@@ -36,11 +36,14 @@ class Budget(Document):
 		action_if_accumulated_monthly_budget_exceeded: DF.Literal["", "Stop", "Warn", "Ignore"]
 		action_if_accumulated_monthly_budget_exceeded_on_mr: DF.Literal["", "Stop", "Warn", "Ignore"]
 		action_if_accumulated_monthly_budget_exceeded_on_po: DF.Literal["", "Stop", "Warn", "Ignore"]
+		action_if_accumulated_monthly_exceeded_on_cumulative_expense: DF.Literal["", "Stop", "Warn", "Ignore"]
 		action_if_annual_budget_exceeded: DF.Literal["", "Stop", "Warn", "Ignore"]
 		action_if_annual_budget_exceeded_on_mr: DF.Literal["", "Stop", "Warn", "Ignore"]
 		action_if_annual_budget_exceeded_on_po: DF.Literal["", "Stop", "Warn", "Ignore"]
+		action_if_annual_exceeded_on_cumulative_expense: DF.Literal["", "Stop", "Warn", "Ignore"]
 		amended_from: DF.Link | None
 		applicable_on_booking_actual_expenses: DF.Check
+		applicable_on_cumulative_expense: DF.Check
 		applicable_on_material_request: DF.Check
 		applicable_on_purchase_order: DF.Check
 		budget_against: DF.Literal["", "Cost Center", "Project"]
@@ -142,7 +145,7 @@ class Budget(Document):
 
 def validate_expense_against_budget(args, expense_amount=0):
 	args = frappe._dict(args)
-	if not frappe.get_all("Budget", limit=1):
+	if not frappe.db.count("Budget", cache=True):
 		return
 
 	if args.get("company") and not args.fiscal_year:
@@ -151,7 +154,7 @@ def validate_expense_against_budget(args, expense_amount=0):
 			"Company", args.get("company"), "exception_budget_approver_role"
 		)
 
-	if not frappe.get_cached_value("Budget", {"fiscal_year": args.fiscal_year, "company": args.company}):  # nosec
+	if not frappe.db.get_value("Budget", {"fiscal_year": args.fiscal_year, "company": args.company}):
 		return
 
 	if not args.account:
@@ -490,20 +493,27 @@ def get_actual_expense(args):
 def get_accumulated_monthly_budget(monthly_distribution, posting_date, fiscal_year, annual_budget):
 	distribution = {}
 	if monthly_distribution:
-		for d in frappe.db.sql(
-			"""select mdp.month, mdp.percentage_allocation
-			from `tabMonthly Distribution Percentage` mdp, `tabMonthly Distribution` md
-			where mdp.parent=md.name and md.fiscal_year=%s""",
-			fiscal_year,
-			as_dict=1,
-		):
+		mdp = frappe.qb.DocType("Monthly Distribution Percentage")
+		md = frappe.qb.DocType("Monthly Distribution")
+
+		res = (
+			frappe.qb.from_(mdp)
+			.join(md)
+			.on(mdp.parent == md.name)
+			.select(mdp.month, mdp.percentage_allocation)
+			.where(md.fiscal_year == fiscal_year)
+			.where(md.name == monthly_distribution)
+			.run(as_dict=True)
+		)
+
+		for d in res:
 			distribution.setdefault(d.month, d.percentage_allocation)
 
 	dt = frappe.get_cached_value("Fiscal Year", fiscal_year, "year_start_date")
 	accumulated_percentage = 0.0
 
 	while dt <= getdate(posting_date):
-		if monthly_distribution:
+		if monthly_distribution and distribution:
 			accumulated_percentage += distribution.get(getdate(dt).strftime("%B"), 0)
 		else:
 			accumulated_percentage += 100.0 / 12

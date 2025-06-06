@@ -44,6 +44,14 @@ frappe.ui.form.on("Material Request", {
 		});
 	},
 
+	schedule_date(frm) {
+		if (frm.doc.schedule_date) {
+			frm.doc.items.forEach((d) => {
+				frappe.model.set_value(d.doctype, d.name, "schedule_date", frm.doc.schedule_date);
+			});
+		}
+	},
+
 	onload: function (frm) {
 		// add item, if previous view was item
 		erpnext.utils.add_item(frm);
@@ -155,17 +163,13 @@ frappe.ui.form.on("Material Request", {
 						() => frm.events.make_purchase_order(frm),
 						__("Create")
 					);
-				}
 
-				if (frm.doc.material_request_type === "Purchase") {
 					frm.add_custom_button(
 						__("Request for Quotation"),
 						() => frm.events.make_request_for_quotation(frm),
 						__("Create")
 					);
-				}
 
-				if (frm.doc.material_request_type === "Purchase") {
 					frm.add_custom_button(
 						__("Supplier Quotation"),
 						() => frm.events.make_supplier_quotation(frm),
@@ -177,6 +181,14 @@ frappe.ui.form.on("Material Request", {
 					frm.add_custom_button(
 						__("Work Order"),
 						() => frm.events.raise_work_orders(frm),
+						__("Create")
+					);
+				}
+
+				if (frm.doc.material_request_type === "Subcontracting") {
+					frm.add_custom_button(
+						__("Subcontracted Purchase Order"),
+						() => frm.events.make_purchase_order(frm),
 						__("Create")
 					);
 				}
@@ -236,7 +248,7 @@ frappe.ui.form.on("Material Request", {
 		frappe.call({
 			method: "erpnext.stock.get_item_details.get_item_details",
 			args: {
-				args: {
+				ctx: {
 					item_code: item.item_code,
 					from_warehouse: item.from_warehouse,
 					warehouse: item.warehouse,
@@ -259,17 +271,20 @@ frappe.ui.form.on("Material Request", {
 			},
 			callback: function (r) {
 				const d = item;
-				const allow_to_change_fields = [
+				let allow_to_change_fields = [
 					"actual_qty",
 					"projected_qty",
 					"min_order_qty",
 					"item_name",
-					"description",
 					"stock_uom",
 					"uom",
 					"conversion_factor",
 					"stock_qty",
 				];
+
+				if (overwrite_warehouse) {
+					allow_to_change_fields.push("description");
+				}
 
 				if (!r.exc) {
 					$.each(r.message, function (key, value) {
@@ -319,7 +334,7 @@ frappe.ui.form.on("Material Request", {
 					default: 1,
 				},
 			],
-			primary_action_label: "Get Items",
+			primary_action_label: __("Get Items"),
 			primary_action(values) {
 				if (!values) return;
 				values["company"] = frm.doc.company;
@@ -553,25 +568,23 @@ erpnext.buying.MaterialRequestController = class MaterialRequestController exten
 
 	onload() {
 		this.frm.set_query("item_code", "items", function (doc, cdt, cdn) {
+			let filters = { is_stock_item: 1 };
+
 			if (doc.material_request_type == "Customer Provided") {
-				return {
-					query: "erpnext.controllers.queries.item_query",
-					filters: {
-						customer: doc.customer,
-						is_stock_item: 1,
-					},
-				};
-			} else if (doc.material_request_type == "Purchase") {
-				return {
-					query: "erpnext.controllers.queries.item_query",
-					filters: { is_purchase_item: 1 },
-				};
-			} else {
-				return {
-					query: "erpnext.controllers.queries.item_query",
-					filters: { is_stock_item: 1 },
-				};
+				filters.customer = doc.customer;
+			} else if (
+				doc.material_request_type == "Purchase" ||
+				doc.material_request_type == "Subcontracting"
+			) {
+				filters = { is_purchase_item: 1 };
+			} else if (doc.material_request_type == "Manufacture") {
+				filters.include_item_in_manufacturing = 1;
 			}
+
+			return {
+				query: "erpnext.controllers.queries.item_query",
+				filters: filters,
+			};
 		});
 	}
 

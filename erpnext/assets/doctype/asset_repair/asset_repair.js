@@ -29,11 +29,21 @@ frappe.ui.form.on("Asset Repair", {
 			};
 		});
 
-		frm.set_query("purchase_invoice", function () {
+		frm.set_query("purchase_invoice", "invoices", function () {
 			return {
+				query: "erpnext.assets.doctype.asset_repair.asset_repair.get_purchase_invoice",
 				filters: {
 					company: frm.doc.company,
-					docstatus: 1,
+				},
+			};
+		});
+
+		frm.set_query("expense_account", "invoices", function (doc, cdt, cdn) {
+			let row = locals[cdt][cdn];
+			return {
+				query: "erpnext.assets.doctype.asset_repair.asset_repair.get_expense_accounts",
+				filters: {
+					purchase_invoice: row.purchase_invoice,
 				},
 			};
 		});

@@ -25,6 +25,14 @@ erpnext.buying = {
 					};
 				});
 
+				this.frm.set_query("project", function (doc) {
+					return {
+						filters: {
+							company: doc.company,
+						},
+					};
+				});
+
 				if (this.frm.doc.__islocal
 					&& frappe.meta.has_field(this.frm.doc.doctype, "disable_rounded_total")) {
 
@@ -44,6 +52,12 @@ erpnext.buying = {
 							};
 						} else
 							return erpnext.queries.company_address_query(this.frm.doc)
+					});
+				}
+
+				if(this.frm.get_field('dispatch_address')) {
+					this.frm.set_query("dispatch_address", () => {
+						return erpnext.queries.address_query(this.frm.doc);
 					});
 				}
 			}
@@ -145,6 +159,25 @@ erpnext.buying = {
 				});
 			}
 
+			company(){
+				if(!frappe.meta.has_field(this.frm.doc.doctype, "billing_address")) return;
+
+				frappe.call({
+					method: "erpnext.setup.doctype.company.company.get_billing_shipping_address",
+					args: {
+						name: this.frm.doc.company,
+						billing_address:this.frm.doc.billing_address,
+						shipping_address: this.frm.doc.shipping_address
+					},
+					callback: (r) => {
+						this.frm.set_value("billing_address", r.message.primary_address || "");
+
+						if(!frappe.meta.has_field(this.frm.doc.doctype, "shipping_address")) return;
+						this.frm.set_value("shipping_address", r.message.shipping_address || "");
+					},
+				});
+			}
+
 			supplier_address() {
 				erpnext.utils.get_address_display(this.frm);
 				erpnext.utils.set_taxes_from_address(this.frm, "supplier_address", "supplier_address", "supplier_address");
@@ -167,7 +200,7 @@ erpnext.buying = {
 			}
 
 			qty(doc, cdt, cdn) {
-				if ((doc.doctype == "Purchase Receipt") || (doc.doctype == "Purchase Invoice" && (doc.update_stock || doc.is_return))) {
+				if ((doc.doctype == "Purchase Receipt") || (doc.doctype == "Purchase Invoice" && doc.update_stock)) {
 					this.calculate_received_qty(doc, cdt, cdn)
 				}
 				super.qty(doc, cdt, cdn);
@@ -268,6 +301,12 @@ erpnext.buying = {
 					"shipping_address_display", true);
 			}
 
+			dispatch_address(){
+				var me = this;
+				erpnext.utils.get_address_display(this.frm, "dispatch_address",
+					"dispatch_address_display", true);
+			}
+
 			billing_address() {
 				erpnext.utils.get_address_display(this.frm, "billing_address",
 					"billing_address_display", true);
@@ -342,12 +381,15 @@ erpnext.buying = {
 			add_serial_batch_bundle(doc, cdt, cdn) {
 				let item = locals[cdt][cdn];
 				let me = this;
+				let fields = ["has_batch_no", "has_serial_no"];
 
-				frappe.db.get_value("Item", item.item_code, ["has_batch_no", "has_serial_no"])
+				frappe.db.get_value("Item", item.item_code, fields)
 					.then((r) => {
 						if (r.message && (r.message.has_batch_no || r.message.has_serial_no)) {
-							item.has_serial_no = r.message.has_serial_no;
-							item.has_batch_no = r.message.has_batch_no;
+							fields.forEach((field) => {
+								item[field] = r.message[field];
+							});
+
 							item.type_of_transaction = item.qty > 0 ? "Inward" : "Outward";
 							item.is_rejected = false;
 
@@ -380,13 +422,16 @@ erpnext.buying = {
 			add_serial_batch_for_rejected_qty(doc, cdt, cdn) {
 				let item = locals[cdt][cdn];
 				let me = this;
+				let fields = ["has_batch_no", "has_serial_no"];
 
-				frappe.db.get_value("Item", item.item_code, ["has_batch_no", "has_serial_no"])
+				frappe.db.get_value("Item", item.item_code, fields)
 					.then((r) => {
 						if (r.message && (r.message.has_batch_no || r.message.has_serial_no)) {
-							item.has_serial_no = r.message.has_serial_no;
-							item.has_batch_no = r.message.has_batch_no;
-							item.type_of_transaction = item.rejected_qty > 0 ? "Inward" : "Outward";
+							fields.forEach((field) => {
+								item[field] = r.message[field];
+							});
+
+							item.type_of_transaction = !doc.is_return > 0 ? "Inward" : "Outward";
 							item.is_rejected = true;
 
 							new erpnext.SerialBatchPackageSelector(
@@ -398,7 +443,7 @@ erpnext.buying = {
 										}
 
 										let update_values = {
-											"serial_and_batch_bundle": r.name,
+											"rejected_serial_and_batch_bundle": r.name,
 											"use_serial_batch_fields": 0,
 											"rejected_qty": qty / flt(item.conversion_factor || 1, precision("conversion_factor", item))
 										}

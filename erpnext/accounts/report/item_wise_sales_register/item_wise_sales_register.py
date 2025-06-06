@@ -11,6 +11,7 @@ from pypika import Order
 
 from erpnext.accounts.report.sales_register.sales_register import get_mode_of_payments
 from erpnext.accounts.report.utils import get_query_columns, get_values_for_columns
+from erpnext.controllers.taxes_and_totals import ItemWiseTaxDetail
 from erpnext.selling.report.item_wise_sales_history.item_wise_sales_history import (
 	get_customer_details,
 )
@@ -384,27 +385,24 @@ def apply_conditions(query, si, sii, filters, additional_conditions=None):
 			| (si.unrealized_profit_loss_account == filters.get("income_account"))
 		)
 
-	if not filters.get("group_by"):
-		query = query.orderby(si.posting_date, order=Order.desc)
-		query = query.orderby(sii.item_group, order=Order.desc)
-	else:
-		query = apply_group_by_conditions(query, si, sii, filters)
-
 	for key, value in (additional_conditions or {}).items():
 		query = query.where(si[key] == value)
 
 	return query
 
 
-def apply_group_by_conditions(query, si, ii, filters):
-	if filters.get("group_by") == "Invoice":
-		query = query.orderby(ii.parent, order=Order.desc)
+def apply_order_by_conditions(query, si, ii, filters):
+	if not filters.get("group_by"):
+		query += f" order by {si.posting_date} desc, {ii.item_group} desc"
+	elif filters.get("group_by") == "Invoice":
+		query += f" order by {ii.parent} desc"
 	elif filters.get("group_by") == "Item":
-		query = query.orderby(ii.item_code)
+		query += f" order by {ii.item_code}"
 	elif filters.get("group_by") == "Item Group":
-		query = query.orderby(ii.item_group)
+		query += f" order by {ii.item_group}"
 	elif filters.get("group_by") in ("Customer", "Customer Group", "Territory", "Supplier"):
-		query = query.orderby(si[frappe.scrub(filters.get("group_by"))])
+		filter_field = frappe.scrub(filters.get("group_by"))
+		query += f" order by {filter_field} desc"
 
 	return query
 
@@ -479,7 +477,17 @@ def get_items(filters, additional_query_columns, additional_conditions=None):
 
 	query = apply_conditions(query, si, sii, filters, additional_conditions)
 
-	return query.run(as_dict=True)
+	from frappe.desk.reportview import build_match_conditions
+
+	query, params = query.walk()
+	match_conditions = build_match_conditions("Sales Invoice")
+
+	if match_conditions:
+		query += " and " + match_conditions
+
+	query = apply_order_by_conditions(query, si, sii, filters)
+
+	return frappe.db.sql(query, params, as_dict=True)
 
 
 def get_delivery_notes_against_sales_order(item_list):
@@ -596,14 +604,10 @@ def get_tax_accounts(
 				for item_code, tax_data in item_wise_tax_detail.items():
 					itemised_tax.setdefault(item_code, frappe._dict())
 
-					if isinstance(tax_data, list):
-						tax_rate, tax_amount = tax_data
-					else:
-						tax_rate = tax_data
-						tax_amount = 0
+					tax_data = ItemWiseTaxDetail(**tax_data)
 
-					if charge_type == "Actual" and not tax_rate:
-						tax_rate = "NA"
+					if charge_type == "Actual" and not tax_data.tax_rate:
+						tax_data.tax_rate = "NA"
 
 					item_net_amount = sum(
 						[flt(d.base_net_amount) for d in item_row_map.get(parent, {}).get(item_code, [])]
@@ -611,7 +615,9 @@ def get_tax_accounts(
 
 					for d in item_row_map.get(parent, {}).get(item_code, []):
 						item_tax_amount = (
-							flt((tax_amount * d.base_net_amount) / item_net_amount) if item_net_amount else 0
+							flt((tax_data.tax_amount * d.base_net_amount) / item_net_amount)
+							if item_net_amount
+							else 0
 						)
 						if item_tax_amount:
 							tax_value = flt(item_tax_amount, tax_amount_precision)
@@ -623,7 +629,7 @@ def get_tax_accounts(
 
 							itemised_tax.setdefault(d.name, {})[description] = frappe._dict(
 								{
-									"tax_rate": tax_rate,
+									"tax_rate": tax_data.tax_rate,
 									"tax_amount": tax_value,
 									"is_other_charges": 0 if tuple([account_head]) in tax_accounts else 1,
 								}

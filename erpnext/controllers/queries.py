@@ -8,22 +8,41 @@ from collections import OrderedDict, defaultdict
 import frappe
 from frappe import qb, scrub
 from frappe.desk.reportview import get_filters_cond, get_match_cond
+from frappe.permissions import has_permission
 from frappe.query_builder import Criterion, CustomFunction
 from frappe.query_builder.functions import Concat, Locate, Sum
-from frappe.utils import nowdate, today, unique
+from frappe.utils import cint, nowdate, today, unique
 from pypika import Order
 
 import erpnext
-from erpnext.stock.get_item_details import _get_item_tax_template
+from erpnext.stock.get_item_details import ItemDetailsCtx, _get_item_tax_template
 
 
 # searches for active employees
 @frappe.whitelist()
 @frappe.validate_and_sanitize_search_inputs
-def employee_query(doctype, txt, searchfield, start, page_len, filters):
+def employee_query(
+	doctype,
+	txt,
+	searchfield,
+	start,
+	page_len,
+	filters,
+	reference_doctype: str | None = None,
+	ignore_user_permissions: bool = False,
+):
 	doctype = "Employee"
 	conditions = []
 	fields = get_fields(doctype, ["name", "employee_name"])
+	ignore_permissions = False
+
+	if reference_doctype and ignore_user_permissions:
+		ignore_permissions = has_ignored_field(reference_doctype, doctype) and has_permission(
+			doctype,
+			ptype="select" if frappe.only_has_select_perm(doctype) else "read",
+		)
+
+	mcond = "" if ignore_permissions else get_match_cond(doctype)
 
 	return frappe.db.sql(
 		"""select {fields} from `tabEmployee`
@@ -42,11 +61,30 @@ def employee_query(doctype, txt, searchfield, start, page_len, filters):
 				"fields": ", ".join(fields),
 				"key": searchfield,
 				"fcond": get_filters_cond(doctype, filters, conditions),
-				"mcond": get_match_cond(doctype),
+				"mcond": mcond,
 			}
 		),
 		{"txt": "%%%s%%" % txt, "_txt": txt.replace("%", ""), "start": start, "page_len": page_len},
 	)
+
+
+def has_ignored_field(reference_doctype, doctype):
+	meta = frappe.get_meta(reference_doctype)
+	for field in meta.fields:
+		if not field.ignore_user_permissions:
+			continue
+		if field.fieldtype == "Link" and field.options == doctype:
+			return True
+		elif field.fieldtype == "Dynamic Link":
+			options = meta.get_link_doctype(field.fieldname)
+			if not options:
+				continue
+			if isinstance(options, str):
+				options = options.split("\n")
+			if doctype in options or "DocType" in options:
+				return True
+
+	return False
 
 
 # searches for leads which are not converted
@@ -198,7 +236,7 @@ def item_query(doctype, txt, searchfield, start, page_len, filters, as_dict=Fals
 			filters.pop("supplier", None)
 
 	description_cond = ""
-	if frappe.db.count(doctype, cache=True) < 50000:
+	if frappe.db.estimate_count(doctype) < 50000:
 		# scan description only if items are less than 50000
 		description_cond = "or tabItem.description LIKE %(txt)s"
 
@@ -276,10 +314,14 @@ def get_project_name(doctype, txt, searchfield, start, page_len, filters):
 	qb_filter_or_conditions = []
 	ifelse = CustomFunction("IF", ["condition", "then", "else"])
 
-	if filters and filters.get("customer"):
-		qb_filter_and_conditions.append(
-			(proj.customer == filters.get("customer")) | proj.customer.isnull() | proj.customer == ""
-		)
+	if filters:
+		if filters.get("customer"):
+			qb_filter_and_conditions.append(
+				(proj.customer == filters.get("customer")) | proj.customer.isnull() | proj.customer == ""
+			)
+
+		if filters.get("company"):
+			qb_filter_and_conditions.append(proj.company == filters.get("company"))
 
 	qb_filter_and_conditions.append(proj.status.notin(["Completed", "Cancelled"]))
 
@@ -371,7 +413,7 @@ def get_batch_no(doctype, txt, searchfield, start, page_len, filters):
 
 
 def get_empty_batches(filters, start, page_len, filtered_batches=None, txt=None):
-	query_filter = {"item": filters.get("item_code")}
+	query_filter = {"item": filters.get("item_code"), "disabled": 0}
 	if txt:
 		query_filter["name"] = ("like", f"%{txt}%")
 
@@ -420,7 +462,6 @@ def get_batches_from_stock_ledger_entries(searchfields, txt, filters, start=0, p
 			stock_ledger_entry.batch_no,
 			Sum(stock_ledger_entry.actual_qty).as_("qty"),
 		)
-		.where((batch_table.expiry_date >= expiry_date) | (batch_table.expiry_date.isnull()))
 		.where(stock_ledger_entry.is_cancelled == 0)
 		.where(
 			(stock_ledger_entry.item_code == filters.get("item_code"))
@@ -432,6 +473,9 @@ def get_batches_from_stock_ledger_entries(searchfields, txt, filters, start=0, p
 		.offset(start)
 		.limit(page_len)
 	)
+
+	if not filters.get("include_expired_batches"):
+		query = query.where((batch_table.expiry_date >= expiry_date) | (batch_table.expiry_date.isnull()))
 
 	query = query.select(
 		Concat("MFG-", batch_table.manufacturing_date).as_("manufacturing_date"),
@@ -471,7 +515,6 @@ def get_batches_from_serial_and_batch_bundle(searchfields, txt, filters, start=0
 			bundle.batch_no,
 			Sum(bundle.qty).as_("qty"),
 		)
-		.where((batch_table.expiry_date >= expiry_date) | (batch_table.expiry_date.isnull()))
 		.where(stock_ledger_entry.is_cancelled == 0)
 		.where(
 			(stock_ledger_entry.item_code == filters.get("item_code"))
@@ -483,6 +526,11 @@ def get_batches_from_serial_and_batch_bundle(searchfields, txt, filters, start=0
 		.offset(start)
 		.limit(page_len)
 	)
+
+	if not filters.get("include_expired_batches"):
+		bundle_query = bundle_query.where(
+			(batch_table.expiry_date >= expiry_date) | (batch_table.expiry_date.isnull())
+		)
 
 	bundle_query = bundle_query.select(
 		Concat("MFG-", batch_table.manufacturing_date),
@@ -802,20 +850,44 @@ def get_tax_template(doctype, txt, searchfield, start, page_len, filters):
 		item_group = item_group_doc.parent_item_group
 
 	if not taxes:
-		return frappe.get_all("Item Tax Template", filters={"disabled": 0, "company": company}, as_list=True)
+		or_filters = []
+		if txt:
+			search_fields = ["name"]
+
+			tax_template_doc = frappe.get_meta("Item Tax Template")
+
+			if title_field := tax_template_doc.title_field:
+				search_fields.append(title_field)
+			if tax_template_doc.search_fields:
+				search_fields.extend(tax_template_doc.get_search_fields())
+
+			for f in search_fields:
+				or_filters.append([doctype, f.strip(), "like", f"%{txt}%"])
+
+		return frappe.get_list(
+			"Item Tax Template",
+			filters={"disabled": 0, "company": company},
+			or_filters=or_filters,
+			as_list=True,
+		)
+
 	else:
 		valid_from = filters.get("valid_from")
 		valid_from = valid_from[1] if isinstance(valid_from, list) else valid_from
 
-		args = {
-			"item_code": filters.get("item_code"),
-			"posting_date": valid_from,
-			"tax_category": filters.get("tax_category"),
-			"company": company,
-		}
+		ctx = ItemDetailsCtx(
+			{
+				"item_code": filters.get("item_code"),
+				"posting_date": valid_from,
+				"tax_category": filters.get("tax_category"),
+				"company": company,
+				"base_net_rate": filters.get("base_net_rate"),
+			}
+		)
 
-		taxes = _get_item_tax_template(args, taxes, for_validate=True)
-		return [(d,) for d in set(taxes)]
+		taxes = _get_item_tax_template(ctx, taxes, for_validate=True)
+		txt = txt.lower()
+		return [(d,) for d in set(taxes) if not txt or txt in d.lower()]
 
 
 def get_fields(doctype, fields=None):
@@ -871,3 +943,32 @@ def get_filtered_child_rows(doctype, txt, searchfield, start, page_len, filters)
 		)
 
 	return query.run(as_dict=False)
+
+
+@frappe.whitelist()
+@frappe.validate_and_sanitize_search_inputs
+def get_item_uom_query(doctype, txt, searchfield, start, page_len, filters):
+	if frappe.get_settings("Stock Settings", "allow_uom_with_conversion_rate_defined_in_item"):
+		query_filters = {"parent": filters.get("item_code")}
+
+		if txt:
+			query_filters["uom"] = ["like", f"%{txt}%"]
+
+		return frappe.get_all(
+			"UOM Conversion Detail",
+			filters=query_filters,
+			fields=["uom", "conversion_factor"],
+			limit_start=start,
+			limit_page_length=page_len,
+			order_by="idx",
+			as_list=1,
+		)
+
+	return frappe.get_all(
+		"UOM",
+		filters={"name": ["like", f"%{txt}%"], "enabled": 1},
+		fields=["name"],
+		limit_start=start,
+		limit_page_length=page_len,
+		as_list=1,
+	)

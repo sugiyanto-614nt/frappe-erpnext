@@ -58,7 +58,10 @@ def get_stock_value_from_bin(warehouse=None, item_code=None):
 
 
 def get_stock_value_on(
-	warehouses: list | str | None = None, posting_date: str | None = None, item_code: str | None = None
+	warehouses: list | str | None = None,
+	posting_date: str | None = None,
+	item_code: str | None = None,
+	company: str | None = None,
 ) -> float:
 	if not posting_date:
 		posting_date = nowdate()
@@ -84,6 +87,9 @@ def get_stock_value_on(
 	if item_code:
 		query = query.where(sle.item_code == item_code)
 
+	if company:
+		query = query.where(sle.company == company)
+
 	return query.run(as_list=True)[0][0]
 
 
@@ -102,6 +108,8 @@ def get_stock_balance(
 	If `with_valuation_rate` is True, will return tuple (qty, rate)"""
 
 	from erpnext.stock.stock_ledger import get_previous_sle
+
+	frappe.has_permission("Item", "read")
 
 	if posting_date is None:
 		posting_date = nowdate()
@@ -206,7 +214,7 @@ def get_bin(item_code, warehouse):
 
 
 def get_or_make_bin(item_code: str, warehouse: str) -> str:
-	bin_record = frappe.get_cached_value("Bin", {"item_code": item_code, "warehouse": warehouse})
+	bin_record = frappe.db.get_value("Bin", {"item_code": item_code, "warehouse": warehouse})
 
 	if not bin_record:
 		bin_obj = _create_bin(item_code, warehouse)
@@ -244,7 +252,7 @@ def get_incoming_rate(args, raise_error_if_no_rate=True):
 		"Item", args.get("item_code"), ["has_serial_no", "has_batch_no"], as_dict=1
 	)
 
-	use_moving_avg_for_batch = frappe.db.get_single_value("Stock Settings", "do_not_use_batchwise_valuation")
+	use_moving_avg_for_batch = frappe.get_settings("Stock Settings", "do_not_use_batchwise_valuation")
 
 	if isinstance(args, dict):
 		args = frappe._dict(args)
@@ -366,9 +374,9 @@ def get_avg_purchase_rate(serial_nos):
 
 def get_valuation_method(item_code):
 	"""get valuation method from item or default"""
-	val_method = frappe.db.get_value("Item", item_code, "valuation_method", cache=True)
+	val_method = frappe.get_cached_value("Item", item_code, "valuation_method")
 	if not val_method:
-		val_method = frappe.db.get_single_value("Stock Settings", "valuation_method", cache=True) or "FIFO"
+		val_method = frappe.get_cached_doc("Stock Settings").valuation_method or "FIFO"
 	return val_method
 
 
@@ -657,4 +665,27 @@ def get_combine_datetime(posting_date, posting_time):
 	if isinstance(posting_time, datetime.timedelta):
 		posting_time = (datetime.datetime.min + posting_time).time()
 
-	return datetime.datetime.combine(posting_date, posting_time).replace(microsecond=0)
+	return datetime.datetime.combine(posting_date, posting_time)
+
+
+@frappe.request_cache
+def get_default_stock_uom() -> str | None:
+	if default_uom := frappe.get_cached_value("Stock Settings", None, "stock_uom"):
+		return default_uom
+
+	acceptable_default_uoms = dict.fromkeys(
+		(
+			"Nos",
+			# In the past, we used to create translated UOMs during initial setup.
+			# These could either be in the system language...
+			_("Nos", frappe.get_system_settings("language")),
+			# or the current user's language
+			_("Nos"),
+		)
+	)
+
+	available_default_uoms = frappe.db.get_values(
+		"UOM", {"name": ("in", tuple(acceptable_default_uoms))}, pluck="name"
+	)
+
+	return next((uom for uom in acceptable_default_uoms if uom in available_default_uoms), None)

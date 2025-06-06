@@ -8,6 +8,7 @@ import frappe
 from frappe import _, throw
 from frappe.contacts.address_and_contact import load_address_and_contact
 from frappe.utils import cint
+from frappe.utils.caching import request_cache
 from frappe.utils.nestedset import NestedSet
 from pypika.terms import ExistsCriterion
 
@@ -32,6 +33,7 @@ class Warehouse(NestedSet):
 		disabled: DF.Check
 		email_id: DF.Data | None
 		is_group: DF.Check
+		is_rejected_warehouse: DF.Check
 		lft: DF.Int
 		mobile_no: DF.Data | None
 		old_parent: DF.Link | None
@@ -220,6 +222,7 @@ def convert_to_group_or_ledger(docname=None):
 	return frappe.get_doc("Warehouse", docname).convert_to_group_or_ledger()
 
 
+@request_cache
 def get_child_warehouses(warehouse):
 	from frappe.utils.nestedset import get_descendants_of
 

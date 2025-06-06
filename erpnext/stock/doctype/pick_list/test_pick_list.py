@@ -3,7 +3,7 @@
 
 import frappe
 from frappe import _dict
-from frappe.tests.utils import FrappeTestCase
+from frappe.tests import IntegrationTestCase, UnitTestCase
 
 from erpnext.selling.doctype.sales_order.sales_order import create_pick_list
 from erpnext.selling.doctype.sales_order.test_sales_order import make_sales_order
@@ -21,10 +21,19 @@ from erpnext.stock.doctype.stock_reconciliation.stock_reconciliation import (
 	EmptyStockReconciliationItemsError,
 )
 
-test_dependencies = ["Item", "Sales Invoice", "Stock Entry", "Batch"]
+EXTRA_TEST_RECORD_DEPENDENCIES = ["Item", "Sales Invoice", "Stock Entry", "Batch"]
 
 
-class TestPickList(FrappeTestCase):
+class UnitTestPickList(UnitTestCase):
+	"""
+	Unit tests for PickList.
+	Use this class for testing individual functions and methods.
+	"""
+
+	pass
+
+
+class TestPickList(IntegrationTestCase):
 	def test_pick_list_picks_warehouse_for_each_item(self):
 		item_code = make_item().name
 		try:
@@ -781,7 +790,7 @@ class TestPickList(FrappeTestCase):
 		self.assertEqual(so.per_delivered, 100)
 
 	def test_picklist_with_partial_bundles(self):
-		# from test_records.json
+		# from self.globalTestRecords
 		warehouse = "_Test Warehouse - _TC"
 
 		quantities = [5, 2]
@@ -870,7 +879,7 @@ class TestPickList(FrappeTestCase):
 
 		so = make_sales_order(item_code=item, qty=4, rate=100)
 		pl = create_pick_list(so.name)
-		self.assertFalse(hasattr(pl, "locations"))
+		self.assertFalse(pl.locations)
 
 	def test_pick_list_validation_for_serial_no(self):
 		warehouse = "_Test Warehouse - _TC"
@@ -901,7 +910,7 @@ class TestPickList(FrappeTestCase):
 
 		so = make_sales_order(item_code=item, qty=4, rate=100)
 		pl = create_pick_list(so.name)
-		self.assertFalse(hasattr(pl, "locations"))
+		self.assertFalse(pl.locations)
 
 	def test_pick_list_validation_for_batch_no(self):
 		warehouse = "_Test Warehouse - _TC"
@@ -937,7 +946,7 @@ class TestPickList(FrappeTestCase):
 
 		so = make_sales_order(item_code=item, qty=4, rate=100)
 		pl = create_pick_list(so.name)
-		self.assertFalse(hasattr(pl, "locations"))
+		self.assertFalse(pl.locations)
 
 	def test_pick_list_validation_for_batch_no_and_serial_item(self):
 		warehouse = "_Test Warehouse - _TC"
@@ -977,7 +986,7 @@ class TestPickList(FrappeTestCase):
 
 		so = make_sales_order(item_code=item, qty=4, rate=100)
 		pl = create_pick_list(so.name)
-		self.assertFalse(hasattr(pl, "locations"))
+		self.assertFalse(pl.locations)
 
 	def test_pick_list_validation_for_multiple_batches_and_sales_order(self):
 		warehouse = "_Test Warehouse - _TC"
@@ -1172,6 +1181,7 @@ class TestPickList(FrappeTestCase):
 
 		for row in pl.locations:
 			row.qty = row.qty + 10
+			row.picked_qty = row.qty
 
 		self.assertRaises(frappe.ValidationError, pl.save)
 
@@ -1241,6 +1251,7 @@ class TestPickList(FrappeTestCase):
 				"is_recursive": 1,
 				"recurse_for": 2,
 				"free_qty": 1,
+				"dont_enforce_free_item_qty": 0,
 				"company": "_Test Company",
 				"customer": "_Test Customer",
 			}
@@ -1266,3 +1277,42 @@ class TestPickList(FrappeTestCase):
 		delivery_note = create_delivery_note(pl.name)
 
 		self.assertEqual(len(delivery_note.items), 1)
+
+	def test_pick_list_not_reset_batch(self):
+		warehouse = "_Test Warehouse - _TC"
+		item = make_item(
+			"Test Do Not Reset Picked Item",
+			properties={
+				"is_stock_item": 1,
+				"has_batch_no": 1,
+				"create_new_batch": 1,
+				"batch_number_series": "BTH-PICKLT-.######",
+			},
+		).name
+
+		se = make_stock_entry(item=item, to_warehouse=warehouse, qty=10)
+		batch1 = get_batch_from_bundle(se.items[0].serial_and_batch_bundle)
+		se = make_stock_entry(item=item, to_warehouse=warehouse, qty=10)
+		batch2 = get_batch_from_bundle(se.items[0].serial_and_batch_bundle)
+
+		so = make_sales_order(item_code=item, qty=10, rate=100)
+
+		pl = create_pick_list(so.name)
+		pl.save()
+
+		for loc in pl.locations:
+			self.assertEqual(loc.batch_no, batch1)
+			loc.batch_no = batch2
+			loc.picked_qty = 0.0
+
+		pl.save()
+
+		for loc in pl.locations:
+			self.assertEqual(loc.batch_no, batch1)
+			loc.batch_no = batch2
+			loc.picked_qty = 10.0
+
+		pl.save()
+
+		for loc in pl.locations:
+			self.assertEqual(loc.batch_no, batch2)

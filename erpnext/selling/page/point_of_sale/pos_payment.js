@@ -1,8 +1,10 @@
 /* eslint-disable no-unused-vars */
 erpnext.PointOfSale.Payment = class {
-	constructor({ events, wrapper }) {
+	constructor({ events, wrapper, settings }) {
 		this.wrapper = wrapper;
 		this.events = events;
+		this.set_gt_to_default_mop = settings.set_grand_total_to_default_mop;
+		this.invoice_fields = settings.invoice_fields;
 
 		this.init_component();
 	}
@@ -17,14 +19,23 @@ erpnext.PointOfSale.Payment = class {
 	prepare_dom() {
 		this.wrapper.append(
 			`<section class="payment-container">
-				<div class="section-label payment-section">${__("Payment Method")}</div>
-				<div class="payment-modes"></div>
-				<div class="fields-numpad-container">
-					<div class="fields-section">
-						<div class="section-label">${__("Additional Information")}</div>
-						<div class="invoice-fields"></div>
+				<div class="payment-split-container">
+					<div class="payment-container-left">
+						<div class="section-label payment-section">${__("Payment Method")}</div>
+						<div class="payment-modes"></div>
 					</div>
-					<div class="number-pad"></div>
+					<div class="payment-container-right">
+						<div class="fields-numpad-container">
+							<div class="fields-section">
+								<div class="invoice-fields">
+									<button class="btn btn-default btn-sm btn-shadow addl-fields hidden">${__(
+										"Update Additional Information"
+									)}</button>
+								</div>
+							</div>
+							<div class="number-pad"></div>
+						</div>
+					</div>
 				</div>
 				<div class="totals-section">
 					<div class="totals"></div>
@@ -40,44 +51,67 @@ erpnext.PointOfSale.Payment = class {
 		this.$invoice_fields_section = this.$component.find(".fields-section");
 	}
 
-	make_invoice_fields_control() {
-		frappe.db.get_doc("POS Settings", undefined).then((doc) => {
-			const fields = doc.invoice_fields;
-			if (!fields.length) return;
-
-			this.$invoice_fields = this.$invoice_fields_section.find(".invoice-fields");
-			this.$invoice_fields.html("");
-			const frm = this.events.get_frm();
-
-			fields.forEach((df) => {
-				this.$invoice_fields.append(
-					`<div class="invoice_detail_field ${df.fieldname}-field" data-fieldname="${df.fieldname}"></div>`
-				);
-				let df_events = {
-					onchange: function () {
-						frm.set_value(this.df.fieldname, this.get_value());
-					},
-				};
-				if (df.fieldtype == "Button") {
-					df_events = {
-						click: function () {
-							if (frm.script_manager.has_handlers(df.fieldname, frm.doc.doctype)) {
-								frm.script_manager.trigger(df.fieldname, frm.doc.doctype, frm.doc.docname);
-							}
-						},
-					};
+	make_invoice_field_dialog() {
+		const me = this;
+		if (!me.invoice_fields.length) return;
+		me.addl_dlg = new frappe.ui.Dialog({
+			title: __("Additional Information"),
+			fields: me.invoice_fields,
+			size: "small",
+			primary_action_label: __("Save"),
+			primary_action(values) {
+				me.set_values_to_frm(values);
+				if (this.complete_order) {
+					me.events.submit_invoice();
 				}
+				this.hide();
+			},
+		});
+		me.addl_dlg.$wrapper.on("hide.bs.modal", function () {
+			me.addl_dlg.complete_order = false;
+		});
+		me.add_btn_field_click_listener();
+		me.set_value_on_dialog_fields();
+		me.make_addl_info_dialog_btn_visible();
+	}
 
-				this[`${df.fieldname}_field`] = frappe.ui.form.make_control({
-					df: {
-						...df,
-						...df_events,
-					},
-					parent: this.$invoice_fields.find(`.${df.fieldname}-field`),
-					render_input: true,
+	set_values_to_frm(values) {
+		const frm = this.events.get_frm();
+		this.addl_dlg.fields.forEach((df) => {
+			frm.set_value(df.fieldname, values[df.fieldname]);
+		});
+		frappe.show_alert({
+			message: __("Additional Information updated successfully."),
+			indicator: "green",
+		});
+	}
+
+	add_btn_field_click_listener() {
+		const frm = this.events.get_frm();
+		this.addl_dlg.fields.forEach((df) => {
+			if (df.fieldtype === "Button") {
+				this.addl_dlg.fields_dict[df.fieldname].$input.on("click", function () {
+					if (frm.script_manager.has_handlers(df.fieldname, frm.doc.doctype)) {
+						frm.script_manager.trigger(df.fieldname, frm.doc.doctype, frm.doc.docname);
+					}
 				});
-				this[`${df.fieldname}_field`].set_value(frm.doc[df.fieldname]);
-			});
+			}
+		});
+	}
+
+	set_value_on_dialog_fields() {
+		const doc = this.events.get_frm().doc;
+		this.addl_dlg.fields.forEach((df) => {
+			if (doc[df.fieldname] || df.default_value) {
+				this.addl_dlg.set_value(df.fieldname, doc[df.fieldname] || df.default_value);
+			}
+		});
+	}
+
+	make_addl_info_dialog_btn_visible() {
+		this.$invoice_fields_section.find(".addl-fields").removeClass("hidden");
+		this.$invoice_fields_section.find(".addl-fields").on("click", () => {
+			this.addl_dlg.show();
 		});
 	}
 
@@ -171,25 +205,11 @@ erpnext.PointOfSale.Payment = class {
 		});
 
 		frappe.ui.form.on("POS Invoice", "coupon_code", (frm) => {
-			if (frm.doc.coupon_code && !frm.applying_pos_coupon_code) {
-				if (!frm.doc.ignore_pricing_rule) {
-					frm.applying_pos_coupon_code = true;
-					frappe.run_serially([
-						() => (frm.doc.ignore_pricing_rule = 1),
-						() => frm.trigger("ignore_pricing_rule"),
-						() => (frm.doc.ignore_pricing_rule = 0),
-						() => frm.trigger("apply_pricing_rule"),
-						() => frm.save(),
-						() => this.update_totals_section(frm.doc),
-						() => (frm.applying_pos_coupon_code = false),
-					]);
-				} else if (frm.doc.ignore_pricing_rule) {
-					frappe.show_alert({
-						message: __("Ignore Pricing Rule is enabled. Cannot apply coupon code."),
-						indicator: "orange",
-					});
-				}
-			}
+			this.bind_coupon_code_event(frm);
+		});
+
+		frappe.ui.form.on("Sales Invoice", "coupon_code", (frm) => {
+			this.bind_coupon_code_event(frm);
 		});
 
 		this.setup_listener_for_payments();
@@ -213,33 +233,74 @@ erpnext.PointOfSale.Payment = class {
 				return;
 			}
 
+			if (!this.validate_reqd_invoice_fields()) {
+				return;
+			}
+
 			this.events.submit_invoice();
 		});
 
 		frappe.ui.form.on("POS Invoice", "paid_amount", (frm) => {
-			this.update_totals_section(frm.doc);
-
-			// need to re calculate cash shortcuts after discount is applied
-			const is_cash_shortcuts_invisible = !this.$payment_modes.find(".cash-shortcuts").is(":visible");
-			this.attach_cash_shortcuts(frm.doc);
-			!is_cash_shortcuts_invisible &&
-				this.$payment_modes.find(".cash-shortcuts").css("display", "grid");
-			this.render_payment_mode_dom();
+			this.bind_paid_amount_event(frm);
 		});
 
 		frappe.ui.form.on("POS Invoice", "loyalty_amount", (frm) => {
-			const formatted_currency = format_currency(frm.doc.loyalty_amount, frm.doc.currency);
-			this.$payment_modes.find(`.loyalty-amount-amount`).html(formatted_currency);
+			this.bind_loyalty_amount_event(frm);
+		});
+
+		frappe.ui.form.on("Sales Invoice", "paid_amount", (frm) => {
+			this.bind_paid_amount_event(frm);
+		});
+
+		frappe.ui.form.on("Sales Invoice", "loyalty_amount", (frm) => {
+			this.bind_loyalty_amount_event(frm);
 		});
 
 		frappe.ui.form.on("Sales Invoice Payment", "amount", (frm, cdt, cdn) => {
 			// for setting correct amount after loyalty points are redeemed
 			const default_mop = locals[cdt][cdn];
-			const mode = default_mop.mode_of_payment.replace(/ +/g, "_").toLowerCase();
+			const mode = this.sanitize_mode_of_payment(default_mop.mode_of_payment);
 			if (this[`${mode}_control`] && this[`${mode}_control`].get_value() != default_mop.amount) {
 				this[`${mode}_control`].set_value(default_mop.amount);
 			}
 		});
+	}
+
+	bind_coupon_code_event(frm) {
+		if (frm.doc.coupon_code && !frm.applying_pos_coupon_code) {
+			if (!frm.doc.ignore_pricing_rule) {
+				frm.applying_pos_coupon_code = true;
+				frappe.run_serially([
+					() => (frm.doc.ignore_pricing_rule = 1),
+					() => frm.trigger("ignore_pricing_rule"),
+					() => (frm.doc.ignore_pricing_rule = 0),
+					() => frm.trigger("apply_pricing_rule"),
+					() => frm.save(),
+					() => this.update_totals_section(frm.doc),
+					() => (frm.applying_pos_coupon_code = false),
+				]);
+			} else if (frm.doc.ignore_pricing_rule) {
+				frappe.show_alert({
+					message: __("Ignore Pricing Rule is enabled. Cannot apply coupon code."),
+					indicator: "orange",
+				});
+			}
+		}
+	}
+
+	bind_paid_amount_event(frm) {
+		this.update_totals_section(frm.doc);
+
+		// need to re calculate cash shortcuts after discount is applied
+		const is_cash_shortcuts_invisible = !this.$payment_modes.find(".cash-shortcuts").is(":visible");
+		this.attach_cash_shortcuts(frm.doc);
+		!is_cash_shortcuts_invisible && this.$payment_modes.find(".cash-shortcuts").css("display", "grid");
+		this.render_payment_mode_dom();
+	}
+
+	bind_loyalty_amount_event(frm) {
+		const formatted_currency = format_currency(frm.doc.loyalty_amount, frm.doc.currency);
+		this.$payment_modes.find(`.loyalty-amount-amount`).html(formatted_currency);
 	}
 
 	setup_listener_for_payments() {
@@ -334,9 +395,9 @@ erpnext.PointOfSale.Payment = class {
 
 	render_payment_section() {
 		this.render_payment_mode_dom();
-		this.make_invoice_fields_control();
+		this.make_invoice_field_dialog();
 		this.update_totals_section();
-		this.focus_on_default_mop();
+		this.set_grand_total_to_default_mop();
 	}
 
 	after_render() {
@@ -350,6 +411,11 @@ erpnext.PointOfSale.Payment = class {
 	}
 
 	checkout() {
+		const frm = this.events.get_frm();
+		frm.cscript.calculate_outstanding_amount();
+		frm.refresh_field("outstanding_amount");
+		frm.refresh_field("paid_amount");
+		frm.refresh_field("base_paid_amount");
 		this.events.toggle_other_sections(true);
 		this.toggle_component(true);
 
@@ -383,7 +449,7 @@ erpnext.PointOfSale.Payment = class {
 		this.$payment_modes.html(
 			`${payments
 				.map((p, i) => {
-					const mode = p.mode_of_payment.replace(/ +/g, "_").toLowerCase();
+					const mode = this.sanitize_mode_of_payment(p.mode_of_payment);
 					const payment_type = p.type;
 					const margin = i % 2 === 0 ? "pr-2" : "pl-2";
 					const amount = p.amount > 0 ? format_currency(p.amount, currency) : "";
@@ -402,7 +468,7 @@ erpnext.PointOfSale.Payment = class {
 		);
 
 		payments.forEach((p) => {
-			const mode = p.mode_of_payment.replace(/ +/g, "_").toLowerCase();
+			const mode = this.sanitize_mode_of_payment(p.mode_of_payment);
 			const me = this;
 			this[`${mode}_control`] = frappe.ui.form.make_control({
 				df: {
@@ -437,7 +503,7 @@ erpnext.PointOfSale.Payment = class {
 		const doc = this.events.get_frm().doc;
 		const payments = doc.payments;
 		payments.forEach((p) => {
-			const mode = p.mode_of_payment.replace(/ +/g, "_").toLowerCase();
+			const mode = this.sanitize_mode_of_payment(p.mode_of_payment);
 			if (p.default) {
 				setTimeout(() => {
 					this.$payment_modes.find(`.${mode}.mode-of-payment-control`).parent().click();
@@ -457,7 +523,7 @@ erpnext.PointOfSale.Payment = class {
 		this.$payment_modes.find(".cash-shortcuts").remove();
 		let shortcuts_html = shortcuts
 			.map((s) => {
-				return `<div class="shortcut" data-value="${s}">${format_currency(s, currency, 0)}</div>`;
+				return `<div class="shortcut" data-value="${s}">${format_currency(s, currency)}</div>`;
 			})
 			.join("");
 
@@ -584,7 +650,7 @@ erpnext.PointOfSale.Payment = class {
 		const remaining = grand_total - doc.paid_amount;
 		const change = doc.change_amount || remaining <= 0 ? -1 * remaining : undefined;
 		const currency = doc.currency;
-		const label = change ? __("Change") : __("To Be Paid");
+		const label = doc.paid_amount > grand_total ? __("Change Amount") : __("Remaining Amount");
 
 		this.$totals.html(
 			`<div class="col">
@@ -606,5 +672,34 @@ erpnext.PointOfSale.Payment = class {
 
 	toggle_component(show) {
 		show ? this.$component.css("display", "flex") : this.$component.css("display", "none");
+	}
+
+	sanitize_mode_of_payment(mode_of_payment) {
+		return mode_of_payment
+			.replace(/ +/g, "_")
+			.replace(/[^\p{L}\p{N}_-]/gu, "")
+			.replace(/^[^_a-zA-Z\p{L}]+/u, "")
+			.toLowerCase();
+	}
+
+	set_grand_total_to_default_mop() {
+		if (this.set_gt_to_default_mop) {
+			this.focus_on_default_mop();
+		}
+	}
+
+	validate_reqd_invoice_fields() {
+		if (this.invoice_fields.length === 0) return true;
+		const doc = this.events.get_frm().doc;
+		for (const df of this.addl_dlg.fields) {
+			if (df.reqd && !doc[df.fieldname]) {
+				this.addl_dlg.primary_action_label = "Submit";
+				this.addl_dlg.complete_order = true;
+				this.addl_dlg.show();
+				this.addl_dlg.fields_dict[df.fieldname].$input.focus();
+				return false;
+			}
+		}
+		return true;
 	}
 };
